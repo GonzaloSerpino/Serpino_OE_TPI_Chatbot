@@ -1,0 +1,10 @@
+# Ignorar la base de datos de SQLite
+vacaciones.db
+*.db
+
+# Ignorar archivos temporales de Python
+__pycache__/
+*.pyc
+
+# Archivos temporales de ejecución
+tempCodeRunnerFile.py

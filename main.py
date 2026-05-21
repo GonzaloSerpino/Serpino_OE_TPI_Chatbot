@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime
 
 def inicializar_bd():
     """Crea la base de datos, las tablas y carga datos de prueba."""
@@ -50,4 +51,201 @@ def inicializar_bd():
 
     conexion.close()
     
+def obtener_sesion(telefono):
+    """Recupera el estado actual del usuario."""
+    conexion = sqlite3.connect('vacaciones.db')
+    cursor = conexion.cursor()
+    cursor.execute('SELECT estado_conversacion, id_legajo FROM sesiones WHERE numero_telefono = ?', (telefono,))
+    resultado = cursor.fetchone()
+    conexion.close()
+    
+    #Si el select devuelve un resultado, devuelve el estado de esa conversacion.
+    if resultado:
+        return resultado[0], resultado[1] # Devuelve estado y legajo
+    #Si no encuentra nada, por defecto pone como "NUEVO" el estado y devuelve None en el numero de legajo, indicando que es una conversacion nueva.
+    return 'NUEVO', None
+    
+def guardar_sesion(telefono, estado, legajo=None):
+    """Actualiza o crea el estado de la conversación."""
+    conexion = sqlite3.connect('vacaciones.db')
+    cursor = conexion.cursor()
+    cursor.execute('''
+        INSERT INTO sesiones (numero_telefono, id_legajo, estado_conversacion, ultima_interaccion)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(numero_telefono) 
+        DO UPDATE SET estado_conversacion=excluded.estado_conversacion, 
+                      id_legajo=excluded.id_legajo, 
+                      ultima_interaccion=CURRENT_TIMESTAMP
+    ''', (telefono, legajo, estado))
+    conexion.commit()
+    conexion.close()
+    
+def insertar_solicitud(legajo, f_inicio, f_fin, estado):
+    """Crea en la base de datos la solicitud de vacaciones."""
+    conexion = sqlite3.connect('vacaciones.db')
+    cursor = conexion.cursor()
+    cursor.execute('''
+        INSERT INTO solicitudes (id_legajo, fecha_inicio, fecha_fin, estado, fecha_solicitud)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ''', (legajo, f_inicio, f_fin, estado))
+    conexion.commit()
+    conexion.close()
+    
+def conteo_solicitud(legajo):
+    """Devuelve si existe una solicitud pendiente."""
+    conexion = sqlite3.connect('vacaciones.db')
+    cursor = conexion.cursor()
+    cursor.execute('SELECT count(*) FROM solicitudes WHERE id_legajo = ?', (legajo,))
+    resultado = cursor.fetchone()
+    conexion.close()
+    
+    return resultado[0] #Devuelvo el numero de solicitudes
+
+def actualizar_dias_disponibles(legajo, dias_a_descontar):
+    """Resta los días solicitados de los días disponibles del empleado."""
+    conexion = sqlite3.connect('vacaciones.db')
+    cursor = conexion.cursor()
+    cursor.execute('''
+        UPDATE empleados 
+        SET dias_disponibles = dias_disponibles - ? 
+        WHERE id_legajo = ?
+    ''', (dias_a_descontar, legajo))
+    conexion.commit()
+    conexion.close()
+
+def procesar_mensaje(telefono, mensaje):
+    """Funcion de decision de mensajes de bot en base al estado del proceso."""
+    estado_actual, legajo = obtener_sesion(telefono)
+    print(estado_actual)
+    mensaje = mensaje.strip().lower()
+
+    # --- ESTADO: NUEVO USUARIO ---
+    if estado_actual == 'NUEVO':
+        respuesta = "¡Hola! Soy el bot de RRHH. Para comenzar, por favor ingresa tu número de legajo."
+        guardar_sesion(telefono, 'ESPERANDO_LEGAJO')
+        return respuesta
+
+    # --- ESTADO: VALIDANDO IDENTIDAD ---
+    elif estado_actual == 'ESPERANDO_LEGAJO':
+        try:
+            legajo_ingresado = int(mensaje)
+            # Validar en la BD
+            conexion = sqlite3.connect('vacaciones.db')
+            cursor = conexion.cursor()
+            cursor.execute('SELECT nombre, apellido FROM empleados WHERE id_legajo = ?', (legajo_ingresado,))
+            empleado = cursor.fetchone()
+            conexion.close()
+
+            if empleado:
+                nombre_emp = empleado[0]
+                respuesta = f"Bienvenido/a {nombre_emp}. ¿Qué deseas hacer?\n1. Nueva Solicitud\n2. Consultar Solicitud"
+                guardar_sesion(telefono, 'MENU_PRINCIPAL', legajo_ingresado)
+            else:
+                respuesta = "Legajo no encontrado. Por favor, verifica e ingresa tu número de legajo nuevamente."
+                # Se mantiene en el mismo estado
+        except ValueError:
+            respuesta = "Por favor, ingresa solo números para tu legajo."
+        
+        return respuesta
+
+    # --- ESTADO: MENÚ PRINCIPAL ---
+    elif estado_actual == 'MENU_PRINCIPAL':
+        if mensaje == '1':
+            solicitud_existente = conteo_solicitud(legajo)
+            
+            if solicitud_existente == 0:
+                conexion = sqlite3.connect('vacaciones.db')
+                cursor = conexion.cursor()
+                cursor.execute('SELECT dias_disponibles, nombre FROM empleados WHERE id_legajo = ?', (legajo,))
+                datos = cursor.fetchone()
+                conexion.close()
+                
+                dias = datos[0]
+                nombre = datos[1]
+                
+                respuesta = f"Hola {nombre}, tienes {dias} días disponibles. Por favor, ingresa el rango de fechas con el formato DD/MM/YYYY - DD/MM/YYYY"
+                guardar_sesion(telefono, 'ESPERANDO_FECHAS', legajo)
+            else:
+                respuesta = "Ya existe una solicitud pendiente de aprobacion."
+                guardar_sesion(telefono, 'NUEVO') #Se reinicia el estado
+            
+        
+        elif mensaje == '2':
+            conexion = sqlite3.connect('vacaciones.db')
+            cursor = conexion.cursor()
+            cursor.execute('SELECT estado FROM solicitudes WHERE id_legajo = ?', (legajo,))
+            datos = cursor.fetchone()
+            respuesta = f"Tu solicitud esta en estado: {datos}"
+            guardar_sesion(telefono, 'NUEVO') #Se reinicia el estado
+        else:
+            #Si se selecciona otra opcion, indica al usuario que ingrese una opcion valida
+            respuesta = "Opción inválida. Por favor responde '1' o '2'."
+        
+        return respuesta
+    
+    elif estado_actual == 'ESPERANDO_FECHAS':
+        try:
+            #Separa el string ingresado por el guion para obtener la diferencia entre fechas
+            partes = mensaje.split('-')
+            if len(partes) != 2:
+                raise ValueError("Formato de Fecha incorrecto. Por favor, ingresa el rango de fechas con el formato DD/MM/YYYY - DD/MM/YYYY")
+            
+            str_inicio = partes[0].strip()
+            str_fin = partes[1].strip()
+
+            #Convertir a objetos datetime (Esto valida que la fecha sea real, ej. no exista el 32/01/2026)
+            fecha_inicio = datetime.strptime(str_inicio, "%d/%m/%Y")
+            fecha_fin = datetime.strptime(str_fin, "%d/%m/%Y")
+
+            #Validar orden cronologico
+            if fecha_fin < fecha_inicio:
+                return "La fecha de fin no puede ser anterior a la fecha de inicio. Por favor, inténtalo de nuevo (DD/MM/YYYY - DD/MM/YYYY):"
+
+            #Calcular la cantidad de dias (se suma 1 para que sea inclusivo)
+            dias_solicitados = (fecha_fin - fecha_inicio).days + 1
+
+            #Validar cantidad de dias disponibles
+            conexion = sqlite3.connect('vacaciones.db')
+            cursor = conexion.cursor()
+            cursor.execute('SELECT dias_disponibles FROM empleados WHERE id_legajo = ?', (legajo,))
+            dias_disponibles = cursor.fetchone()[0]
+            conexion.close()
+
+            if dias_solicitados > dias_disponibles:
+                return f"Estás solicitando {dias_solicitados} días, pero solo tienes {dias_disponibles} disponibles. Por favor, ingresa un rango menor:"
+
+            # 6. Si todo está correcto: Guardar solicitud y descontar días
+            insertar_solicitud(legajo, str_inicio, str_fin, 'PENDIENTE_APROBACION')
+            actualizar_dias_disponibles(legajo, dias_solicitados)
+            
+            respuesta = f"¡Éxito! Tu solicitud por {dias_solicitados} días ha sido registrada y está 'Pendiente de aprobación'. Tus días disponibles han sido actualizados."
+            guardar_sesion(telefono, 'NUEVO') # Finaliza el trámite
+
+        except ValueError:
+            # Se captura cualquier error de formato o fechas inexistentes
+            respuesta = "El formato de la fecha es incorrecto o la fecha no existe. Usa exactamente DD/MM/YYYY - DD/MM/YYYY."
+            # Mantenemos el estado en ESPERANDO_FECHAS para que lo vuelva a intentar
+
+        return respuesta
+
+    else:
+        # Mecanismo de seguridad frente a estados rotos
+        guardar_sesion(telefono, 'NUEVO')
+        return "Ocurrió un error y la sesión se reinició. Por favor, envía un mensaje para empezar de nuevo."
+
+
+
 inicializar_bd()
+print("--- SIMULADOR DE CHATBOT INICIADO ---")
+print("(Escribe 'salir' para terminar la simulación)\n")
+
+telefono_simulado = "+5491112345678" # Simulamos que siempre habla la misma persona
+
+while True:
+    mensaje_usuario = input("Tú: ")
+    if mensaje_usuario.lower() == 'salir':
+        break
+        
+    respuesta_bot = procesar_mensaje(telefono_simulado, mensaje_usuario)
+    print(f"Bot: {respuesta_bot}\n")
+    
