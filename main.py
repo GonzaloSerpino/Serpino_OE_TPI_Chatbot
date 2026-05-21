@@ -1,5 +1,8 @@
 import sqlite3
 from datetime import datetime
+#Importo las funciones de Flask 
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
 
 def inicializar_bd():
     """Crea la base de datos, las tablas y carga datos de prueba."""
@@ -150,9 +153,9 @@ def procesar_mensaje(telefono, mensaje):
 
     # --- ESTADO: MENÚ PRINCIPAL ---
     elif estado_actual == 'MENU_PRINCIPAL':
+        solicitud_existente = conteo_solicitud(legajo)
+        
         if mensaje == '1':
-            solicitud_existente = conteo_solicitud(legajo)
-            
             if solicitud_existente == 0:
                 conexion = sqlite3.connect('vacaciones.db')
                 cursor = conexion.cursor()
@@ -171,12 +174,15 @@ def procesar_mensaje(telefono, mensaje):
             
         
         elif mensaje == '2':
-            conexion = sqlite3.connect('vacaciones.db')
-            cursor = conexion.cursor()
-            cursor.execute('SELECT estado FROM solicitudes WHERE id_legajo = ?', (legajo,))
-            datos = cursor.fetchone()
-            respuesta = f"Tu solicitud esta en estado: {datos}"
-            guardar_sesion(telefono, 'NUEVO') #Se reinicia el estado
+            if solicitud_existente != 0:
+                conexion = sqlite3.connect('vacaciones.db')
+                cursor = conexion.cursor()
+                cursor.execute('SELECT estado FROM solicitudes WHERE id_legajo = ?', (legajo,))
+                datos = cursor.fetchone()
+                respuesta = f"Tu solicitud esta en estado: {datos[0]}"
+                guardar_sesion(telefono, 'NUEVO') #Se reinicia el estado
+            else: 
+                respuesta = f"No se encuentrar solicitudes existentes para el legajo {legajo}"
         else:
             #Si se selecciona otra opcion, indica al usuario que ingrese una opcion valida
             respuesta = "Opción inválida. Por favor responde '1' o '2'."
@@ -235,17 +241,30 @@ def procesar_mensaje(telefono, mensaje):
 
 
 
-inicializar_bd()
-print("--- SIMULADOR DE CHATBOT INICIADO ---")
-print("(Escribe 'salir' para terminar la simulación)\n")
+# Inicializamos la aplicación Flask
+app = Flask(__name__)
 
-telefono_simulado = "+5491112345678" # Simulamos que siempre habla la misma persona
+# Esta es la ruta (endpoint) que WhatsApp/Twilio va a consultar
+@app.route('/whatsapp', methods=['POST'])
+def webhook_whatsapp():
+    # 1. Twilio nos envía los datos del mensaje recibido mediante un POST request
+    mensaje_entrante = request.values.get('Body', '')
+    numero_remitente = request.values.get('From', '')
 
-while True:
-    mensaje_usuario = input("Tú: ")
-    if mensaje_usuario.lower() == 'salir':
-        break
-        
-    respuesta_bot = procesar_mensaje(telefono_simulado, mensaje_usuario)
-    print(f"Bot: {respuesta_bot}\n")
-    
+    # 2. Le pasamos el número y el texto a tu máquina de estados
+    respuesta_bot = procesar_mensaje(numero_remitente, mensaje_entrante)
+
+    # 3. Formateamos la respuesta usando la librería de Twilio
+    respuesta_twilio = MessagingResponse()
+    mensaje_twilio = respuesta_twilio.message()
+    mensaje_twilio.body(respuesta_bot)
+
+    # 4. Devolvemos el XML que Twilio necesita para mandar el WhatsApp de vuelta
+    return str(respuesta_twilio)
+
+if __name__ == '__main__':
+    inicializar_bd()
+    print("--- SERVIDOR DEL CHATBOT INICIADO ---")
+    print("El bot está escuchando en el puerto 5000...")
+    # debug=True permite que el servidor se reinicie solo si hacés cambios en el código
+    app.run(port=5000, debug=True)
